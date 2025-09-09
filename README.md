@@ -1,2 +1,3 @@
 # my-first-repo
-Learning GitHub with DevOps 
+Learning GitHub with DevOPs
+lokesh kumar bandari
