@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Collaborative Whiteboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, getDoc, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        setLogLevel('debug'); // Enable Firestore debug logging
+
+        // Global variables provided by the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth, userId;
+        const whiteboardId = 'main-whiteboard'; // Unique ID for our shared whiteboard
+
+        // Store drawing data in memory
+        let drawingData = [];
+        let isDrawing = false;
+        let currentColor = '#000000';
+        let isErasing = false;
+        let lastPosition = null;
+
+        // Initialize Firebase and set up user authentication
+        const setupFirebase = async () => {
+            try {
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                // Sign in with the custom token if available, otherwise sign in anonymously
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                userId = auth.currentUser.uid;
+                document.getElementById('user-info').innerText = `User ID: ${userId}`;
+                console.log(`Signed in as user: ${userId}`);
+
+                setupFirestoreListener();
+            } catch (error) {
+                console.error("Error setting up Firebase:", error);
+                document.getElementById('user-info').innerText = 'Error: Could not connect to Firebase.';
+            }
+        };
+
+        // Set up real-time listener for the whiteboard data
+        const setupFirestoreListener = () => {
+            const whiteboardDocRef = doc(db, `/artifacts/${appId}/public/data/whiteboards/${whiteboardId}`);
+            
+            onSnapshot(whiteboardDocRef, (docSnap) => {
+                if (docSnap.exists() && docSnap.data().data) {
+                    try {
+                        // Parse the JSON string to get the drawing data
+                        drawingData = JSON.parse(docSnap.data().data);
+                        redrawCanvas();
+                        console.log("Received data from Firestore and redrawing canvas.");
+                    } catch (e) {
+                        console.error("Error parsing drawing data:", e);
+                    }
+                } else {
+                    console.log("No data found, starting with a blank canvas.");
+                    drawingData = [];
+                    redrawCanvas();
+                }
+            }, (error) => {
+                console.error("Firestore onSnapshot error:", error);
+            });
+        };
+
+        // Update drawing data in Firestore
+        const updateFirestore = async () => {
+            const whiteboardDocRef = doc(db, `/artifacts/${appId}/public/data/whiteboards/${whiteboardId}`);
+            try {
+                // Check if the document exists
+                const docSnap = await getDoc(whiteboardDocRef);
+                const newDrawingData = JSON.stringify(drawingData);
+
+                if (docSnap.exists()) {
+                    // Update the existing document
+                    await updateDoc(whiteboardDocRef, { data: newDrawingData });
+                } else {
+                    // Create a new document if it doesn't exist
+                    await setDoc(whiteboardDocRef, { data: newDrawingData });
+                }
+                console.log("Drawing data updated in Firestore.");
+            } catch (error) {
+                console.error("Error updating Firestore:", error);
+            }
+        };
+
+        // Drawing functions
+        const canvas = document.getElementById('whiteboard-canvas');
+        const ctx = canvas.getContext('2d');
+        let rect = canvas.getBoundingClientRect();
+
+        const resizeCanvas = () => {
+            rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+            redrawCanvas();
+        };
+
+        const getMousePos = (e) => {
+            // Get position relative to the canvas
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            return {
+                x: (e.clientX - rect.left) * scaleX,
+                y: (e.clientY - rect.top) * scaleY
+            };
+        };
+        
+        const getTouchPos = (e) => {
+            const touch = e.touches[0];
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            return {
+                x: (touch.clientX - rect.left) * scaleX,
+                y: (touch.clientY - rect.top) * scaleY
+            };
+        };
+        
+        const startDrawing = (position) => {
+            isDrawing = true;
+            lastPosition = position;
+        };
+
+        const drawLine = (start, end) => {
+            ctx.beginPath();
+            ctx.moveTo(start.x, start.y);
+            ctx.lineTo(end.x, end.y);
+            ctx.strokeStyle = isErasing ? '#FFFFFF' : currentColor;
+            ctx.lineWidth = isErasing ? 20 : 5;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+            
+            // Record the line data
+            drawingData.push({
+                start,
+                end,
+                color: currentColor,
+                eraser: isErasing,
+                userId: userId // Add user ID to track who drew what
+            });
+        };
+
+        const redrawCanvas = () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // Draw a white background for erasing to work
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            drawingData.forEach(line => {
+                ctx.beginPath();
+                ctx.moveTo(line.start.x, line.start.y);
+                ctx.lineTo(line.end.x, line.end.y);
+                ctx.strokeStyle = line.eraser ? '#FFFFFF' : line.color;
+                ctx.lineWidth = line.eraser ? 20 : 5;
+                ctx.lineCap = 'round';
+                ctx.stroke();
+            });
+        };
+
+        // Event listeners
+        canvas.addEventListener('mousedown', (e) => startDrawing(getMousePos(e)));
+        canvas.addEventListener('touchstart', (e) => { e.preventDefault(); startDrawing(getTouchPos(e)); });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isDrawing) return;
+            const newPos = getMousePos(e);
+            drawLine(lastPosition, newPos);
+            lastPosition = newPos;
+        });
+
+        canvas.addEventListener('touchmove', (e) => {
+            if (!isDrawing) return;
+            const newPos = getTouchPos(e);
+            drawLine(lastPosition, newPos);
+            lastPosition = newPos;
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            if (isDrawing) {
+                isDrawing = false;
+                updateFirestore(); // Send the drawing data to Firestore when the user lifts the mouse
+            }
+        });
+        canvas.addEventListener('touchend', () => {
+            if (isDrawing) {
+                isDrawing = false;
+                updateFirestore();
+            }
+        });
+        
+        // UI event handlers
+        document.getElementById('clear-btn').addEventListener('click', async () => {
+            drawingData = [];
+            await updateFirestore();
+            console.log("Whiteboard cleared.");
+        });
+
+        document.getElementById('eraser-btn').addEventListener('click', () => {
+            isErasing = true;
+            document.getElementById('status-text').innerText = 'Mode: Eraser';
+        });
+
+        document.getElementById('pen-btn').addEventListener('click', () => {
+            isErasing = false;
+            document.getElementById('status-text').innerText = 'Mode: Pen';
+        });
+
+        document.getElementById('color-picker').addEventListener('change', (e) => {
+            currentColor = e.target.value;
+            isErasing = false;
+            document.getElementById('status-text').innerText = 'Mode: Pen';
+        });
+
+        window.addEventListener('resize', resizeCanvas);
+        
+        // Initial setup
+        window.onload = () => {
+            resizeCanvas();
+            setupFirebase();
+        };
+
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 p-4">
+    <div class="flex flex-col items-center justify-center h-full w-full max-w-7xl mx-auto space-y-4">
+        <!-- Header & Info -->
+        <div class="w-full flex flex-col sm:flex-row justify-between items-center bg-white p-4 rounded-xl shadow-md">
+            <h1 class="text-2xl font-bold text-gray-800">Collaborative Whiteboard</h1>
+            <div class="text-sm text-gray-600 mt-2 sm:mt-0" id="user-info">Connecting...</div>
+        </div>
+
+        <!-- Canvas and Controls -->
+        <div class="flex flex-col md:flex-row w-full h-full space-y-4 md:space-y-0 md:space-x-4">
+            <!-- Controls Sidebar -->
+            <div class="bg-white p-4 rounded-xl shadow-md flex-shrink-0 md:w-64">
+                <h2 class="text-xl font-semibold mb-2">Tools</h2>
+                <div class="flex flex-row md:flex-col space-x-2 md:space-x-0 md:space-y-2">
+                    <button id="pen-btn" class="flex-1 md:flex-none bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors">
+                        Pen
+                    </button>
+                    <button id="eraser-btn" class="flex-1 md:flex-none bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors">
+                        Eraser
+                    </button>
+                    <input type="color" id="color-picker" value="#000000" class="flex-1 md:flex-none w-full h-10 border-none rounded-lg cursor-pointer p-0.5">
+                    <button id="clear-btn" class="flex-1 md:flex-none bg-red-500 hover:bg-red-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors">
+                        Clear Board
+                    </button>
+                </div>
+                <div id="status-text" class="text-center text-sm text-gray-500 mt-4">Mode: Pen</div>
+            </div>
+
+            <!-- Canvas Area -->
+            <div class="bg-white rounded-xl shadow-md overflow-hidden flex-grow relative">
+                <canvas id="whiteboard-canvas" class="w-full h-full bg-white cursor-crosshair"></canvas>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
